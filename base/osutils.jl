@@ -18,6 +18,7 @@ function _os_test(qm,ex,test)
         return esc(ex.args[2])
     end
 end
+
 macro windows(qm,ex)
     _os_test(qm, ex, OS_NAME===:Windows)
 end
@@ -42,4 +43,26 @@ macro osx_only(ex)
 end
 macro linux_only(ex)
     @linux? esc(ex) : nothing
+end
+
+# Windows version macros
+
+WINDOWS_XP_VER = v"5.1"
+
+@windows_only function windows_version()
+    verinfo = ccall(:GetVersion, Uint32, ())
+    VersionNumber(verinfo & 0xFF, (verinfo >> 8) & 0xFF)
+end
+@unix_only windows_version() = v"0.0"
+
+macro windowsXP(qm,ex)
+    _os_test(qm, ex, OS_NAME===:Windows && windows_version() <= WINDOWS_XP_VER)
+end
+
+macro windowsXP_only(ex)
+    @windowsXP? esc(ex) : nothing
+end
+
+macro non_windowsXP_only(ex)
+    @windowsXP? nothing : esc(ex)
 end

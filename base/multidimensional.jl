@@ -1,7 +1,7 @@
 ### From array.jl
 
 @ngenerate N function _checksize(A::AbstractArray, I::NTuple{N, Any}...)
-    @nexprs N d->(size(A, d) == length(I_d) || throw(DimensionMismatch("Index $d has length $(length(I_d)), but size(A, $d) = $(size(A,d))")))
+    @nexprs N d->(size(A, d) == length(I_d) || throw(DimensionMismatch("index $d has length $(length(I_d)), but size(A, $d) = $(size(A,d))")))
     nothing
 end
 checksize(A, I) = (_checksize(A, I); return nothing)
@@ -159,31 +159,42 @@ end
 fill!(A::AbstractArray, x) = (_fill!(A, x); return A)
 
 
-### from bitarray.jl
+### BitArrays
 
-# note: we can gain some performance if the first dimension is a range;
-# but we need to single-out the N=0 case due to how @ngenerate works
-# case N = 0
-function getindex(B::BitArray, I0::Range1)
-    ndims(B) < 1 && error("wrong number of dimensions")
+## getindex
+
+# general scalar indexing with two or more indices
+# (uses linear indexing, which performs the final bounds check and
+# is defined in bitarray.jl)
+
+@ngenerate N function getindex(B::BitArray, I_0::Int, I::NTuple{N,Int}...)
+    stride = 1
+    index = I_0
+    @nexprs N d->begin
+        l = size(B,d)
+        stride *= l
+        1 <= I_{d-1} <= l || throw(BoundsError())
+        index += (I_d - 1) * stride
+    end
+    return B[index]
+end
+
+# contiguous multidimensional indexing: if the first dimension is a range,
+# we can get some performance from using copy_chunks
+
+function getindex(B::BitArray, I0::Range1{Int})
     checkbounds(B, I0)
     X = BitArray(length(I0))
     copy_chunks(X.chunks, 1, B.chunks, first(I0), length(I0))
     return X
 end
 
-# TODO: extend to I:Union(Real,AbstractArray)... (i.e. not necessarily contiguous)
-@ngenerate N function getindex(B::BitArray, I0::Range1, I::NTuple{N,Union(Real,Range1)}...)
-    ndims(B) < N+1 && error("wrong number of dimensions")
+@ngenerate N function getindex(B::BitArray, I0::Range1{Int}, I::NTuple{N,Union(Int,Range1{Int})}...)
     checkbounds(B, I0, I...)
     X = BitArray(index_shape(I0, I...))
 
-    I0 = to_index(I0)
-
     f0 = first(I0)
     l0 = length(I0)
-
-    Base.@nexprs N d->(I_d = to_index(I_d))
 
     gap_lst_1 = 0
     @nexprs N d->(gap_lst_{d+1} = length(I_d))
@@ -207,9 +218,10 @@ end
     return X
 end
 
-@ngenerate N function getindex(B::BitArray, I::NTuple{N,Union(Real,AbstractVector)}...)
+# general multidimensional non-scalar indexing
+
+@ngenerate N function getindex(B::BitArray, I::NTuple{N,Union(Int,AbstractVector{Int})}...)
     checkbounds(B, I...)
-    @nexprs N d->(I_d = to_index(I_d))
     X = BitArray(index_shape(I...))
     Xc = X.chunks
 
@@ -221,34 +233,49 @@ end
     return X
 end
 
-# note: we can gain some performance if the first dimension is a range;
-# case N = 0
-function setindex!(B::BitArray, X::BitArray, I0::Range1)
-    ndims(B) != 1 && error("wrong number of dimensions in assigment")
-    I0 = to_index(I0)
+# general version with Real (or logical) indexing which dispatches on the appropriate method
+
+@ngenerate N function getindex(B::BitArray, I::NTuple{N,Union(Real,AbstractVector)}...)
+    @nexprs N d->(J_d = to_index(I_d))
+    return @nref N B J
+end
+
+## setindex!
+
+# general scalar indexing with two or more indices
+# (uses linear indexing, which performs the final bounds check and
+# is defined in bitarray.jl)
+
+@ngenerate N function setindex!(B::BitArray, x::Bool, I_0::Int, I::NTuple{N,Int}...)
+    stride = 1
+    index = I_0
+    @nexprs N d->begin
+        l = size(B,d)
+        stride *= l
+        1 <= I_{d-1} <= l || throw(BoundsError())
+        index += (I_d - 1) * stride
+    end
+    B[index] = x
+    return B
+end
+
+# contiguous multidimensional indexing: if the first dimension is a range,
+# we can get some performance from using copy_chunks
+
+function setindex!(B::BitArray, X::BitArray, I0::Range1{Int})
     checkbounds(B, I0)
-    lI = length(I0)
-    length(X) != lI && error("array assignment dimensions mismatch")
-    lI == 0 && return B
-    f0 = first(I0)
+    setindex_shape_check(X, I0)
     l0 = length(I0)
+    l0 == 0 && return B
+    f0 = first(I0)
     copy_chunks(B.chunks, f0, X.chunks, 1, l0)
     return B
 end
 
-# TODO: extend to I:Union(Real,AbstractArray)... (i.e. not necessarily contiguous)
-@ngenerate N function setindex!(B::BitArray, X::BitArray, I0::Range1, I::NTuple{N,Union(Real,Range1)}...)
-    ndims(B) != N+1 && error("wrong number of dimensions in assigment")
-    I0 = to_index(I0)
-    lI = length(I0)
-
-    @nexprs N d->begin
-        I_d = to_index(I_d)
-        lI *= length(I_d)
-    end
-    length(X) != lI && error("array assignment dimensions mismatch")
+@ngenerate N function setindex!(B::BitArray, X::BitArray, I0::Range1{Int}, I::NTuple{N,Union(Int,Range1{Int})}...)
     checkbounds(B, I0, I...)
-    lI == 0 && return B
+    setindex_shape_check(X, I0, I...)
+    length(X) == 0 && return B
     f0 = first(I0)
     l0 = length(I0)
 
@@ -275,17 +302,11 @@ end
     return B
 end
 
-@ngenerate N function setindex!(B::BitArray, X::AbstractArray, I::NTuple{N,Union(Real,AbstractArray)}...)
+# general multidimensional non-scalar indexing
+
+@ngenerate N function setindex!(B::BitArray, X::AbstractArray, I::NTuple{N,Union(Int,AbstractArray{Int})}...)
     checkbounds(B, I...)
-    @nexprs N d->(I_d = to_index(I_d))
-    nel = 1
-    @nexprs N d->(nel *= length(I_d))
-    length(X) != nel && error("argument dimensions must match")
-    if ndims(X) > 1
-        @nexprs N d->begin
-            size(X,d) != length(I_d) && error("argument dimensions must match")
-        end
-    end
+    setindex_shape_check(X, I...)
     refind = 1
     @nloops N i d->I_d begin
         (@nref N B i) = X[refind] # TODO: should avoid bounds checking
@@ -294,16 +315,38 @@ end
     return B
 end
 
-@ngenerate N function setindex!(B::BitArray, x, I::NTuple{N,Union(Real,AbstractArray)}...)
-    x = convert(Bool, x)
+@ngenerate N function setindex!(B::BitArray, x::Bool, I::NTuple{N,Union(Int,AbstractArray{Int})}...)
     checkbounds(B, I...)
-    @nexprs N d->(I_d = to_index(I_d))
-    Bc = B.chunks
+    @nexprs N d->(length(I_d) == 0 && throw_setindex_mismatch(x, tuple(I...)))
     @nloops N i d->I_d begin
         (@nref N B i) = x # TODO: should avoid bounds checking
     end
     return B
 end
+
+# general versions with Real (or logical) indexing which dispatch on the appropriate method
+
+# (multiple signatures for disambiguation)
+for T in [Real, Union(Real, AbstractArray)]
+    @eval begin
+        @ngenerate N function setindex!(B::BitArray, x, I::NTuple{N,$T}...)
+            y = convert(Bool, x)
+            @nexprs N d->(J_d = to_index(I_d))
+            (@nref N B J) = y
+            return B
+        end
+        @ngenerate N function setindex!(B::BitArray, X::AbstractArray, I::NTuple{N,$T}...)
+            @nexprs N d->(J_d = to_index(I_d))
+            (@nref N B J) = X
+            return B
+        end
+    end
+end
+setindex!(B::BitArray, x) = setindex!(B, convert(Bool,x))
+
+
+
+## findn
 
 @ngenerate N function findn{N}(B::BitArray{N})
     nnzB = nnz(B)
@@ -320,14 +363,16 @@ end
     return I
 end
 
+## permutedims
+
 for (V, PT, BT) in [((:N,), BitArray, BitArray), ((:T,:N), Array, StridedArray)]
-    @eval begin
-    @ngenerate N function permutedims!{$(V...)}(P::$PT{$(V...)}, B::$BT{$(V...)}, perm)
+    @eval @ngenerate N function permutedims!{$(V...)}(P::$PT{$(V...)}, B::$BT{$(V...)}, perm)
         dimsB = size(B)
-        (length(perm) == N && isperm(perm)) || error("no valid permutation of dimensions")
+        length(perm) == N || error("expected permutation of size $N, but length(perm)=$(length(perm))")
+        isperm(perm) || error("input is not a permutation")
         dimsP = size(P)
         for i = 1:length(perm)
-            dimsP[i] == dimsB[perm[i]] || error("destination tensor of incorrect size")
+            dimsP[i] == dimsB[perm[i]] || throw(DimensionMismatch("destination tensor of incorrect size"))
         end
 
         #calculates all the strides
@@ -354,6 +399,5 @@ for (V, PT, BT) in [((:N,), BitArray, BitArray), ((:T,:N), Array, StridedArray)]
             end)
 
         return P
-    end
     end
 end
